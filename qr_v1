@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校内マップ用 QRコード案内カード生成器</title>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- QRious (軽量・安定したQRコード生成ライブラリ) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+<!-- JSZip (一括ZIPダウンロード用) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  @media print {
+    .no-print { display: none !important; }
+    .print-grid {
+      display: grid !important;
+      grid-template-columns: repeat(2, 1fr) !important;
+      gap: 16px !important;
+      padding: 0 !important;
+    }
+    .print-card {
+      break-inside: avoid;
+      page-break-inside: avoid;
+      box-shadow: none !important;
+      border: 1px solid #cbd5e1 !important;
+    }
+  }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans min-h-screen pb-12">
+
+  <!-- ヘッダー -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30 no-print">
+    <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-lg shadow-md">
+          QR
+        </div>
+        <div>
+          <h1 class="font-bold text-lg text-slate-900 leading-tight">校内マップ用 QRコード案内カード生成器</h1>
+          <p class="text-xs text-slate-500">JSONデータを読み込み、マップアプリ互換のQR案内カードを一括作成します</p>
+        </div>
+      </div>
+      
+      <div id="actionControls" class="hidden flex items-center gap-3">
+        <button onclick="window.print()" class="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-sm font-bold transition flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg>
+          印刷
+        </button>
+        <button id="downloadBtn" onclick="downloadSelected()" class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold shadow-md transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+          選択したQRをダウンロード (<span id="selectedCount">0</span>)
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 mt-6">
+    
+    <!-- JSONファイル読込エリア -->
+    <section class="no-print bg-white rounded-2xl p-6 shadow-sm border border-slate-200 mb-6">
+      <h2 class="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2">
+        <span class="w-6 h-6 rounded-full bg-blue-100 text-blue-600 text-xs flex items-center justify-center font-bold">1</span>
+        マップデータJSONファイルを読み込み
+      </h2>
+      <div class="flex flex-col sm:flex-row items-center gap-4">
+        <label class="w-full sm:w-auto flex-1 border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-4 text-center cursor-pointer transition bg-slate-50 hover:bg-blue-50/30">
+          <input type="file" id="jsonInput" accept=".json" class="hidden" onchange="handleFileUpload(event)">
+          <div class="flex items-center justify-center gap-2 text-sm font-medium text-slate-600">
+            <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+            JSONファイルを選択（一括マップデータ または 単一フロアデータ）
+          </div>
+        </label>
+      </div>
+    </section>
+
+    <!-- 選択コントロール ＆ フロアフィルター -->
+    <section id="selectionSection" class="hidden no-print bg-white rounded-2xl p-4 shadow-sm border border-slate-200 mb-6">
+      <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-3 mb-3">
+        <div class="flex items-center gap-3">
+          <label class="inline-flex items-center gap-2 text-sm font-bold text-slate-700 cursor-pointer select-none">
+            <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this.checked)" class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500">
+            全選択 / 全解除
+          </label>
+          <span class="text-xs text-slate-400">|</span>
+          <span class="text-xs font-medium text-slate-500">
+            全 <span id="totalRoomsCount" class="font-bold text-slate-700">0</span> 箇所中 <span id="selectedRoomsCount" class="font-bold text-blue-600">0</span> 箇所選択
+          </span>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold text-slate-500">フロア絞り込み:</span>
+          <select id="floorFilter" onchange="filterCardsByFloor(this.value)" class="text-xs font-bold bg-slate-100 border border-slate-200 rounded-lg px-3 py-1.5 text-slate-700 outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="ALL">すべてのフロア</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- 生成カード表示グリッド -->
+    <section id="cardsContainer" class="print-grid grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+    </section>
+
+  </main>
+
+<script>
+  let loadedFloors = [];
+  let allRoomData = [];
+
+  function handleFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.floors && Array.isArray(data.floors)) {
+          loadedFloors = data.floors;
+        } else if (data.floorId) {
+          loadedFloors = [data];
+        } else {
+          alert('正しい形式のマップJSONファイルではありません。');
+          return;
+        }
+        processMapData();
+      } catch (err) {
+        alert('JSONファイルの解析に失敗しました: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function processMapData() {
+    allRoomData = [];
+    const filterSelect = document.getElementById('floorFilter');
+    filterSelect.innerHTML = '<option value="ALL">すべてのフロア</option>';
+
+    loadedFloors.forEach(f => {
+      const option = document.createElement('option');
+      option.value = f.floorId;
+      option.textContent = f.floorName;
+      filterSelect.appendChild(option);
+
+      if (f.rooms && Array.isArray(f.rooms)) {
+        f.rooms.forEach(r => {
+          const key = `${f.floorId}::${r.id}`;
+          allRoomData.push({
+            key: key,
+            floorId: f.floorId,
+            floorName: f.floorName,
+            room: r,
+            selected: true
+          });
+        });
+      }
+    });
+
+    if (allRoomData.length === 0) {
+      alert('該当する部屋データが見つかりませんでした。');
+      return;
+    }
+
+    document.getElementById('selectionSection').classList.remove('hidden');
+    document.getElementById('actionControls').classList.remove('hidden');
+    document.getElementById('selectAllCheckbox').checked = true;
+
+    renderCards();
+  }
+
+  function renderCards() {
+    const container = document.getElementById('cardsContainer');
+    container.innerHTML = '';
+
+    allRoomData.forEach((item) => {
+      // カード外枠
+      const cardEl = document.createElement('div');
+      cardEl.className = 'print-card bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-col items-center justify-between relative transition hover:shadow-md';
+      cardEl.dataset.floorId = item.floorId;
+      cardEl.dataset.key = item.key;
+
+      // チェックボックス
+      const checkLabel = document.createElement('label');
+      checkLabel.className = 'no-print absolute top-3 left-3 z-10 flex items-center justify-center p-1.5 rounded-lg bg-slate-100/80 hover:bg-blue-50 cursor-pointer border border-slate-200';
+      const checkInput = document.createElement('input');
+      checkInput.type = 'checkbox';
+      checkInput.checked = item.selected;
+      checkInput.className = 'w-4 h-4 rounded text-blue-600 focus:ring-blue-500';
+      checkInput.onchange = (e) => {
+        item.selected = e.target.checked;
+        updateSelectionStats();
+      };
+      checkLabel.appendChild(checkInput);
+      cardEl.appendChild(checkLabel);
+
+      // 単一保存ボタン
+      const singleDlBtn = document.createElement('button');
+      singleDlBtn.className = 'no-print absolute top-3 right-3 z-10 p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-slate-100 transition';
+      singleDlBtn.title = 'このカードを個別保存';
+      singleDlBtn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>`;
+      singleDlBtn.onclick = () => downloadSingleCard(item);
+      cardEl.appendChild(singleDlBtn);
+
+      // Canvas描画
+      const canvas = createCardCanvas(item);
+      canvas.className = 'w-full h-auto rounded-lg';
+      cardEl.appendChild(canvas);
+      item.canvas = canvas;
+
+      container.appendChild(cardEl);
+    });
+
+    updateSelectionStats();
+  }
+
+  // 指定されたデザインレイアウトでCanvasに直接描画
+  function createCardCanvas(item) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const width = 600;
+    const height = 800;
+    canvas.width = width;
+    canvas.height = height;
+
+    // 背景 & 枠線
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 16;
+    ctx.strokeRect(8, 8, width - 16, height - 16);
+
+    // 1. [ フロア名 ]
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#2563eb'; // 青
+    ctx.font = 'bold 28px sans-serif';
+    ctx.fillText(`[ ${item.floorName} ]`, width / 2, 75);
+
+    // 2. 部屋名
+    ctx.fillStyle = '#1e293b'; // 濃紺
+    ctx.font = '900 48px sans-serif';
+    ctx.fillText(item.room.title, width / 2, 135);
+
+    // 3. QRコードの生成（QRiousライブラリで直接Canvas要素を生成し同期描画）
+    const qrPayload = `CAMPUSNAV:${item.floorId}::${item.room.id}`;
+    const qrCanvas = document.createElement('canvas');
+    
+    new QRious({
+      element: qrCanvas,
+      value: qrPayload,
+      size: 380,
+      level: 'H' // エラー訂正レベル高（読み取りやすく）
+    });
+
+    // QRコードを中央に描画
+    ctx.drawImage(qrCanvas, (width - 380) / 2, 180, 380, 380);
+
+    // 4. データ識別文字列
+    ctx.fillStyle = '#64748b'; // グレー
+    ctx.font = '22px monospace';
+    ctx.fillText(qrPayload, width / 2, 625);
+
+    // 5. 案内テキスト
+    ctx.fillStyle = '#94a3b8'; // 淡いサブテキスト
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillText('カメラで読み取って現在地を設定', width / 2, 710);
+
+    return canvas;
+  }
+
+  function updateSelectionStats() {
+    const selectedItems = allRoomData.filter(i => i.selected);
+    document.getElementById('totalRoomsCount').textContent = allRoomData.length;
+    document.getElementById('selectedRoomsCount').textContent = selectedItems.length;
+    document.getElementById('selectedCount').textContent = selectedItems.length;
+    document.getElementById('downloadBtn').disabled = selectedItems.length === 0;
+
+    const selectAllCb = document.getElementById('selectAllCheckbox');
+    selectAllCb.checked = selectedItems.length === allRoomData.length && allRoomData.length > 0;
+  }
+
+  function toggleSelectAll(checked) {
+    allRoomData.forEach(item => {
+      item.selected = checked;
+    });
+    document.querySelectorAll('#cardsContainer input[type="checkbox"]').forEach(cb => {
+      cb.checked = checked;
+    });
+    updateSelectionStats();
+  }
+
+  function filterCardsByFloor(floorId) {
+    const cards = document.querySelectorAll('.print-card');
+    cards.forEach(card => {
+      if (floorId === 'ALL' || card.dataset.floorId === floorId) {
+        card.style.display = '';
+      } else {
+        card.style.display = 'none';
+      }
+    });
+  }
+
+  function downloadSingleCard(item) {
+    const link = document.createElement('a');
+    link.download = `${item.floorName}_${item.room.title}_QR.png`;
+    link.href = item.canvas.toDataURL('image/png');
+    link.click();
+  }
+
+  async function downloadSelected() {
+    const selectedItems = allRoomData.filter(i => i.selected);
+    if (selectedItems.length === 0) return;
+
+    if (selectedItems.length === 1) {
+      downloadSingleCard(selectedItems[0]);
+      return;
+    }
+
+    const zip = new JSZip();
+    const folder = zip.folder("campus_qr_codes");
+
+    selectedItems.forEach(item => {
+      const dataUrl = item.canvas.toDataURL('image/png');
+      const base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
+      const fileName = `${item.floorName}_${item.room.title}_${item.room.id}.png`;
+      folder.file(fileName, base64Data, { base64: true });
+    });
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(content);
+    link.download = "campus_qr_codes.zip";
+    link.click();
+  }
+</script>
+</body>
+</html>
