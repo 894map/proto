@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Google Maps Style Campus Navigation</title>
+<title>Hakuyo map v13</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.prod.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
@@ -450,7 +450,7 @@
       </button>
       <div class="text-white text-xs font-bold bg-black/50 px-4 py-2 rounded-full backdrop-blur-md border border-white/10 flex items-center gap-1.5">
         <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-        画面内全域スキャン中
+        QRコードスキャン中
       </div>
       <button class="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center backdrop-blur-md border border-white/20 active:scale-95 transition-transform" @click="toggleQrManualMode" title="手動で選択">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
@@ -466,7 +466,7 @@
         <span>読み取り完了：{{ qrJustDetected }}</span>
       </div>
       <div v-else class="bg-black/40 text-white/90 text-xs font-medium px-4 py-2 rounded-full backdrop-blur-md border border-white/10 shadow text-center">
-        QRコードを画面内に収めてください（どの位置でもOK）
+        QRコードにかざしてください
       </div>
     </div>
 
