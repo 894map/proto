@@ -1,0 +1,1658 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Google Maps Style Campus Navigation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.prod.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #e5e3df; color: #3c4043;
+    font-family: Roboto, Arial, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    touch-action: none;
+  }
+  #app { height: 100%; display: flex; flex-direction: column; position: relative; }
+  
+  /* マップ表示コンテナ */
+  .map-viewport {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    position: relative;
+    overflow: hidden;
+    cursor: grab;
+    background: #e5e3df;
+    touch-action: none;
+  }
+  .map-viewport:active {
+    cursor: grabbing;
+  }
+
+  /* ズーム・パン変形を適用するキャンバス */
+  .map-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+    transition: transform 0.3s ease-out;
+  }
+
+  .node-hit { cursor: pointer; }
+
+  /* Google Maps 純正ルートライン */
+  .route-line {
+    stroke: #1a73e8;
+    stroke-width: 8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+    filter: drop-shadow(0 2px 4px rgba(26,115,232,0.3));
+  }
+
+  /* 階層間接続の点線 */
+  .floor-connector {
+    stroke: #1a73e8;
+    stroke-width: 4;
+    stroke-dasharray: 6 6;
+    fill: none;
+  }
+
+  /* Google Maps スタイル シャドウ */
+  .gm-shadow {
+    box-shadow: 0 2px 6px rgba(60,64,67,0.15), 0 1px 2px rgba(60,64,67,0.3);
+  }
+  .gm-shadow-lg {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  }
+
+  /* Google Maps スタイル マーカー */
+  .pin-current { fill: #1a73e8; stroke: #ffffff; stroke-width: 3; }
+  .pin-dest { fill: #ea4335; stroke: #ffffff; stroke-width: 3; }
+
+  /* Google Maps スタイル ボトムシート */
+  .bottom-sheet {
+    transition: transform 0.25s cubic-bezier(0,0,0.2,1);
+    border-top-left-radius: 16px;
+    border-top-right-radius: 16px;
+  }
+
+  /* スキャン検出時アニメーション */
+  @keyframes scanPulse {
+    0% { transform: scale(0.98); opacity: 0.8; }
+    50% { transform: scale(1.02); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .qr-detected-box {
+    animation: scanPulse 0.3s ease-out forwards;
+  }
+
+  input, select { outline: none; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Floating Header Area (Google Maps Bar & Route Info) -->
+  <div class="absolute top-0 left-0 right-0 z-30 p-3 pointer-events-none space-y-2 max-w-md mx-auto" style="padding-top: calc(12px + env(safe-area-inset-top, 0px));">
+    
+    <!-- 1. Google Maps 純正風検索バー -->
+    <div class="pointer-events-auto bg-white rounded-full h-12 px-3 flex items-center gap-2 gm-shadow">
+      <button @click="menuOpen = true" class="w-9 h-9 flex items-center justify-center text-gray-600 hover:bg-gray-100 rounded-full">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+      </button>
+      <input ref="searchInputRef"
+             v-model="searchQuery"
+             @input="onSearchInput"
+             @focus="showSearchResults = true"
+             :placeholder="searchPlaceholder"
+             class="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-500">
+      <button v-if="searchQuery" @click="clearSearch" class="p-1 text-gray-500">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+      </button>
+      <button @click="favModalOpen = true" class="w-9 h-9 flex items-center justify-center text-gray-600 hover:bg-gray-100 rounded-full" title="保存済み">
+        <svg class="w-5 h-5 text-yellow-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+      </button>
+    </div>
+
+    <!-- 2. ルート案内カード -->
+    <div v-if="currentLocation || destination" class="pointer-events-auto bg-white rounded-2xl p-3 gm-shadow">
+      <div class="flex items-center justify-between mb-2 pb-1 border-b border-gray-100">
+        <div class="text-xs font-bold text-gray-700 flex items-center gap-1">
+          <svg class="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 24 24"><path d="M21.71 11.29l-9-9c-.39-.39-1.02-.39-1.41 0l-9 9c-.39.39-.39 1.02 0 1.41l9 9c.39.39 1.02.39 1.41 0l9-9c.39-.38.39-1.01 0-1.41zM14 14.5V12h-4v3H8v-4c0-.55.45-1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/></svg>
+          経路案内
+        </div>
+        <button @click="clearRoute" class="text-xs text-blue-600 font-bold hover:underline">ルート解除</button>
+      </div>
+      <div class="space-y-1.5 text-xs">
+        <div @click="activateSearchMode('current')"
+             class="flex items-center gap-2 bg-gray-50 p-2 rounded-lg border border-gray-100 cursor-pointer hover:bg-blue-50/50 transition-colors">
+          <span class="w-2.5 h-2.5 rounded-full bg-blue-600 shrink-0"></span>
+          <span class="text-gray-800 font-medium truncate flex-1" :class="{'text-gray-400': !currentLocation}">
+            {{ currentLocation ? currentLocation.label : '現在地を選択...' }}
+          </span>
+        </div>
+        <div @click="activateSearchMode('dest')"
+             class="flex items-center gap-2 bg-gray-50 p-2 rounded-lg border border-gray-100 cursor-pointer hover:bg-blue-50/50 transition-colors">
+          <span class="w-2.5 h-2.5 rounded-full bg-red-600 shrink-0"></span>
+          <span class="text-gray-800 font-medium truncate flex-1" :class="{'text-gray-400': !destination}">
+            {{ destination ? destination.label : '目的地を選択...' }}
+          </span>
+        </div>
+      </div>
+      <div v-if="!routeFound" class="mt-2 text-xs text-red-600 font-bold text-center">
+        経路が見つかりませんでした
+      </div>
+    </div>
+
+    <!-- 検索結果ドロップダウン -->
+    <div v-if="showSearchResults && searchResults.length > 0"
+         class="pointer-events-auto bg-white rounded-2xl gm-shadow overflow-hidden max-h-60 overflow-y-auto border border-gray-100">
+      <div v-for="r in searchResults" :key="r.room.id"
+           class="px-4 py-3 hover:bg-gray-50 cursor-pointer text-sm border-b border-gray-100 flex items-center gap-3"
+           @click="selectSearchResult(r)">
+        <svg class="w-4 h-4 text-gray-400 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+        <div>
+          <div class="font-medium text-gray-800">{{ r.room.title }}</div>
+          <div class="text-xs text-gray-400">{{ r.floorName }}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- フロア切替チップ -->
+    <div class="pointer-events-auto flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar" v-if="floors.length > 0">
+      <button v-if="isMultiFloorRoute"
+              class="px-3.5 py-1.5 text-xs font-bold rounded-full whitespace-nowrap transition-all gm-shadow border flex items-center gap-1"
+              :class="currentFloorId === 'all_route' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50'"
+              @click="setFloorMode('all_route')">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+        経路案内
+      </button>
+      <button v-for="f in floors" :key="f.floorId"
+              class="px-3.5 py-1.5 text-xs font-bold rounded-full whitespace-nowrap transition-all gm-shadow border"
+              :class="f.floorId === currentFloorId ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'"
+              @click="setFloorMode(f.floorId)">
+        {{ f.floorName }}
+      </button>
+    </div>
+
+  </div>
+
+  <!-- Map Area (Pan & Pinch-zoom Interactive Container) -->
+  <div class="map-viewport" ref="mapViewport"
+       @pointerdown="onPointerDown"
+       @pointermove="onPointerMove"
+       @pointerup="onPointerUp"
+       @pointercancel="onPointerUp"
+       @wheel="onWheel">
+    
+    <div v-if="floors.length === 0" class="w-full h-full flex flex-col items-center justify-center text-gray-400 text-sm p-8 text-center pointer-events-none">
+      <svg class="w-12 h-12 text-gray-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+      <div>マップデータが読み込まれていません</div>
+      <button @click="menuOpen = true" class="pointer-events-auto mt-4 px-5 py-2.5 bg-blue-600 text-white rounded-full text-xs font-bold gm-shadow">
+        マップデータを読み込む
+      </button>
+    </div>
+
+    <!-- Transform Matrix Canvas -->
+    <div v-else class="map-canvas" :style="canvasTransformStyle">
+      <div :style="{ width: canvasWidth + 'px', height: totalCanvasHeight + 'px', position: 'relative' }">
+        
+        <!-- 全階表示時のフロア間をつなぐ点線 -->
+        <svg v-if="isMultiFloorView" :width="canvasWidth" :height="totalCanvasHeight" class="absolute top-0 left-0 overflow-visible pointer-events-none z-10">
+          <line v-for="(conn, idx) in multiFloorInterConnections" :key="'conn_'+idx"
+                :x1="conn.x1" :y1="conn.y1" :x2="conn.x2" :y2="conn.y2"
+                class="floor-connector"/>
+        </svg>
+
+        <!-- 各フロアのレンダリング -->
+        <div v-for="item in visibleFloorLayouts" :key="item.floor.floorId"
+             :style="{ position: 'absolute', top: item.offsetY + 'px', left: '0px', width: canvasWidth + 'px', height: item.height + 'px' }">
+          
+          <!-- フロア見出し（全階表示時） -->
+          <div v-if="isMultiFloorView" class="absolute left-4 top-2 z-10 bg-gray-900/75 text-white px-3 py-1 rounded-md text-xs font-bold backdrop-blur-sm shadow">
+            {{ item.floor.floorName }}
+          </div>
+
+          <!-- 背景画像 -->
+          <img v-if="item.floor.bgImage" :src="item.floor.bgImage"
+               class="absolute top-0 left-0 select-none pointer-events-none max-w-none"
+               :style="{ width: canvasWidth + 'px', height: item.height + 'px', opacity: 0.85 }"
+               @load="onImageLoad($event, item.floor)">
+
+          <svg :width="canvasWidth" :height="item.height" class="absolute top-0 left-0 overflow-visible">
+            <defs>
+              <!-- 吹き出しのドロップシャドウフィルタ -->
+              <filter id="bubble-shadow" x="-30%" y="-30%" width="160%" height="160%">
+                <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.25"/>
+              </filter>
+            </defs>
+
+            <!-- エッジ (通路) -->
+            <line v-for="e in item.floor.edges" :key="'bg_'+e.id"
+                  :x1="nodeXY(item.floor,e.from).x" :y1="nodeXY(item.floor,e.from).y"
+                  :x2="nodeXY(item.floor,e.to).x" :y2="nodeXY(item.floor,e.to).y"
+                  stroke="#cbd5e1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+            <line v-for="e in item.floor.edges" :key="e.id"
+                  :x1="nodeXY(item.floor,e.from).x" :y1="nodeXY(item.floor,e.from).y"
+                  :x2="nodeXY(item.floor,e.to).x" :y2="nodeXY(item.floor,e.to).y"
+                  stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+            <!-- 経路案内ライン -->
+            <polyline v-if="routeSegmentForFloor(item.floor.floorId).length > 1"
+              :points="routeSegmentForFloor(item.floor.floorId).map(p => p.x + ',' + p.y).join(' ')"
+              class="route-line"/>
+
+            <!-- 部屋ピン & 画像吹き出し -->
+            <g v-for="pin in roomPinsOfFloor(item.floor)" :key="pin.uniqueId" class="node-hit" @pointerdown.stop @click="openRoomPopup(pin.room, item.floor)">
+              
+              <!-- マーカー（青い点） -->
+              <circle :cx="pin.x" :cy="pin.y" r="9" fill="#ffffff" stroke="#5f6368" stroke-width="2.5"/>
+              <circle :cx="pin.x" :cy="pin.y" r="4" fill="#1a73e8"/>
+              
+              <!-- 画像(imageUrl)が設定されている場合のきれいな吹き出しUI -->
+              <g v-if="pin.room.imageUrl">
+                <!-- 吹き出し背景（丸角長方形 50x34 ＋ 下部の三角矢印） -->
+                <path d="M 588 313 
+                  h 40 
+                  a 5 5 0 0 1 5 5 
+                  v 24 
+                  a 5 5 0 0 1 -5 5 
+                  h -15 
+                  l -5 6 
+                  l -5 -6 
+                  h -15 
+                  a 5 5 0 0 1 -5 -5 
+                  v -24 
+                  a 5 5 0 0 1 5 -5 Z" 
+                fill="#ffffff" stroke="#94a3b8" stroke-width="1" filter="url(#bubble-shadow)" />
+
+                <!-- サムネイル画像 -->
+                <image :href="pin.room.imageUrl" 
+                       :x="pin.x - 23" 
+                       :y="pin.y - 48" 
+                       width="46" 
+                       height="30" 
+                       preserveAspectRatio="xMidYMid slice" 
+                       clip-path="inset(0px round 3px)"/>
+              </g>
+
+              <!-- 部屋名ラベル -->
+              <text :x="pin.x + 14" :y="pin.y + 5" fill="#3c4043" font-size="12" font-weight="bold" class="pointer-events-none select-none">{{ pin.title }}</text>
+            </g>
+
+            <!-- 階段ピン -->
+            <g v-for="n in item.floor.nodes.filter(x => x.type === 'stair')" :key="n.id" class="node-hit" @pointerdown.stop @click="openStairInfo(n, item.floor)">
+              <circle :cx="n.x" :cy="n.y" r="10.5" fill="#fbbc04" stroke="#ffffff" stroke-width="2.5"/>
+              <text :x="n.x + 15" :y="n.y + 5" fill="#b06000" font-size="12" font-weight="bold" class="pointer-events-none select-none">{{ n.label || '階段' }}</text>
+            </g>
+
+            <!-- 階段での階移動用矢印アイコン（ルート案内中） -->
+            <g v-for="sw in stairTransitionsForFloor(item.floor.floorId)" :key="'sw_'+sw.node.id" class="node-hit" @pointerdown.stop @click="jumpToStair(sw.targetFloorId, sw.targetNodeId)">
+              <circle :cx="sw.node.x + 22" :cy="sw.node.y - 22" r="14" fill="#ffffff" stroke="#1a73e8" stroke-width="2.5" class="gm-shadow"/>
+              <circle :cx="sw.node.x + 22" :cy="sw.node.y - 22" r="11" :fill="sw.direction === 'up' ? '#1a73e8' : '#e11d48'"/>
+              <text :x="sw.node.x + 22" :y="sw.node.y - 17" fill="#ffffff" font-size="14" font-weight="900" text-anchor="middle" class="pointer-events-none select-none">
+                {{ sw.direction === 'up' ? '↗' : '↘' }}
+              </text>
+            </g>
+
+            <!-- 現在地ピン -->
+            <g v-if="currentLocation && currentLocation.floorId === item.floor.floorId">
+              <circle :cx="currentLocation.x" :cy="currentLocation.y" r="16.5" class="pin-current"/>
+              <circle :cx="currentLocation.x" :cy="currentLocation.y" r="6" fill="#ffffff"/>
+              <text :x="currentLocation.x" :y="currentLocation.y - 22" fill="#1a73e8" font-size="12" font-weight="bold" text-anchor="middle">現在地</text>
+            </g>
+            <!-- 目的地ピン -->
+            <g v-if="destination && destination.floorId === item.floor.floorId">
+              <circle :cx="destination.x" :cy="destination.y" r="16.5" class="pin-dest"/>
+              <circle :cx="destination.x" :cy="destination.y" r="6" fill="#ffffff"/>
+              <text :x="destination.x" :y="destination.y - 22" fill="#ea4335" font-size="12" font-weight="bold" text-anchor="middle">目的地</text>
+            </g>
+          </svg>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Right-Bottom Floating Controls -->
+  <div class="absolute right-4 bottom-6 z-30 flex flex-col items-end gap-3 pointer-events-none" style="padding-bottom: env(safe-area-inset-bottom, 0px);">
+    <button class="pointer-events-auto w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center gm-shadow-lg active:scale-95 transition-transform"
+            @click="openQrScanner" title="QRコード">
+      <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm13-2h3v2h-3v-2zm-3 0h2v3h-2v-3zm3 3h3v5h-3v-5zm-3 2h2v3h-2v-3zm0-2h2v1h-2v-1z"/></svg>
+    </button>
+    <div class="pointer-events-auto flex flex-col bg-white rounded-xl overflow-hidden gm-shadow border border-gray-100">
+      <button class="w-10 h-10 text-gray-700 text-lg flex items-center justify-center hover:bg-gray-50 active:bg-gray-100" @click="zoomIn">＋</button>
+      <div class="h-[1px] bg-gray-200"></div>
+      <button class="w-10 h-10 text-gray-700 text-lg flex items-center justify-center hover:bg-gray-50 active:bg-gray-100" @click="zoomOut">－</button>
+    </div>
+  </div>
+
+  <!-- Bottom Sheet (Room Detail) -->
+  <div v-if="popup.open" class="absolute bottom-0 left-0 right-0 z-40 bg-white bottom-sheet p-5 gm-shadow-lg border-t border-gray-100 pointer-events-auto max-w-md mx-auto"
+       style="padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));">
+    <div class="w-8 h-1 bg-gray-300 rounded-full mx-auto mb-3"></div>
+    <div class="flex justify-between items-start mb-2">
+      <div>
+        <span class="text-[11px] text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded">{{ popup.floorName }}</span>
+        <h2 class="text-lg font-bold text-gray-900 mt-1">{{ popup.room.title }}</h2>
+      </div>
+      <button class="text-gray-400 hover:text-gray-600 p-1" @click="popup.open = false">
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+      </button>
+    </div>
+
+    <img v-if="popup.room.imageUrl" :src="popup.room.imageUrl" class="w-full h-32 object-cover rounded-xl my-2 bg-gray-100">
+    <p class="text-xs text-gray-600 mb-4 line-clamp-2">{{ popup.room.description || '説明情報はありません。' }}</p>
+
+    <div class="flex gap-2">
+      <button class="flex-1 py-2.5 rounded-full bg-blue-50 text-blue-600 font-bold text-xs flex items-center justify-center gap-1 hover:bg-blue-100 active:scale-98 transition-all"
+              @click="setAsCurrent">
+        現在地に設定
+      </button>
+      <button class="flex-1 py-2.5 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center gap-1 hover:bg-blue-700 active:scale-98 transition-all gm-shadow"
+              @click="setAsDestination">
+        目的地に設定
+      </button>
+      <button class="w-10 h-10 rounded-full border border-gray-200 flex items-center justify-center text-gray-600 hover:bg-gray-50 active:scale-98 shrink-0"
+              @click="toggleFavorite(popup.room, popup.floorId, popup.floorName)">
+        <svg class="w-5 h-5" :class="isFavorite(popup.room.id) ? 'text-yellow-500 fill-current' : 'text-gray-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"></path></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Favorites List Modal -->
+  <div v-if="favModalOpen" class="fixed inset-0 z-50 flex items-center justify-center p-4" @click.self="favModalOpen = false">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="favModalOpen = false"></div>
+    <div class="relative w-full max-w-sm bg-white rounded-2xl p-5 gm-shadow-lg z-10">
+      <div class="flex justify-between items-center mb-3 border-b border-gray-100 pb-2">
+        <h3 class="font-bold text-gray-900 text-sm flex items-center gap-1.5">
+          <svg class="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+          保存済みの場所
+        </h3>
+        <button class="text-gray-400 hover:text-gray-600" @click="favModalOpen = false">✕</button>
+      </div>
+
+      <div v-if="favorites.length === 0" class="text-xs text-gray-400 py-6 text-center">
+        お気に入りに登録されたスポットはありません。
+      </div>
+
+      <div v-else class="max-h-64 overflow-y-auto space-y-1">
+        <div v-for="fav in favorites" :key="fav.roomId" class="flex justify-between items-center p-2.5 hover:bg-gray-50 rounded-xl cursor-pointer" @click="jumpToFavorite(fav)">
+          <div>
+            <div class="text-xs font-bold text-gray-800">{{ fav.title }}</div>
+            <div class="text-[10px] text-gray-400">{{ fav.floorName }}</div>
+          </div>
+          <button class="text-gray-400 hover:text-red-500 p-1" @click.stop="removeFavorite(fav)">✕</button>
+        </div>
+      </div>
+
+      <button class="w-full mt-4 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-xs font-bold hover:bg-gray-200" @click="favModalOpen = false">
+        閉じる
+      </button>
+    </div>
+  </div>
+
+  <!-- Side Navigation Drawer -->
+  <div v-if="menuOpen" class="fixed inset-0 z-50 flex" @click.self="menuOpen = false">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="menuOpen = false"></div>
+    <div class="relative w-72 bg-white h-full p-5 overflow-y-auto z-10 flex flex-col justify-between">
+      <div>
+        <div class="flex items-center gap-2 mb-6">
+          <div class="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-sm">校</div>
+          <span class="font-bold text-base text-gray-800">校内マップ ナビ</span>
+        </div>
+
+        <div class="space-y-4">
+          <div>
+            <div class="text-xs font-bold text-gray-400 mb-2">データ管理</div>
+            <label class="block w-full text-left px-3 py-2.5 bg-gray-50 hover:bg-gray-100 rounded-xl cursor-pointer text-xs font-medium text-gray-700 border border-gray-200 mb-2">
+              📂 一括JSONを読み込み
+              <input type="file" accept=".json" class="hidden" @change="importAllFloors">
+            </label>
+            <label class="block w-full text-left px-3 py-2.5 bg-gray-50 hover:bg-gray-100 rounded-xl cursor-pointer text-xs font-medium text-gray-700 border border-gray-200">
+              ➕ フロアJSONを追加
+              <input type="file" accept=".json" class="hidden" @change="importOneFloor">
+            </label>
+          </div>
+
+          <div v-if="floors.length > 0">
+            <div class="text-xs font-bold text-gray-400 mb-2">読み込み済みフロア</div>
+            <div v-for="f in floors" :key="f.floorId" class="flex justify-between items-center py-2 text-xs border-b border-gray-100">
+              <span class="text-gray-700 font-medium">{{ f.floorName }}</span>
+              <button class="text-red-500 hover:text-red-700" @click="removeFloor(f.floorId)">削除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button class="w-full py-2.5 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs font-bold text-gray-600" @click="menuOpen = false">
+        閉じる
+      </button>
+    </div>
+  </div>
+
+  <!-- QR Modal (Camera Scanner) -->
+  <div v-if="qrModalOpen" class="fixed inset-0 z-50 flex flex-col bg-black overflow-hidden">
+    <video ref="qrVideoRef" class="absolute inset-0 w-full h-full object-cover" playsinline muted autoplay></video>
+    <canvas ref="qrCanvasRef" class="hidden"></canvas>
+    <canvas ref="qrBinarizeCanvasRef" class="hidden"></canvas>
+
+    <div class="relative z-20 flex items-center justify-between p-4 pointer-events-auto" style="padding-top: calc(16px + env(safe-area-inset-top, 0px));">
+      <button class="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center backdrop-blur-md border border-white/20 active:scale-95 transition-transform" @click="closeQrScanner">
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+      </button>
+      <div class="text-white text-xs font-bold bg-black/50 px-4 py-2 rounded-full backdrop-blur-md border border-white/10 flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+        QRコードスキャン中
+      </div>
+      <button class="w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center backdrop-blur-md border border-white/20 active:scale-95 transition-transform" @click="toggleQrManualMode" title="手動で選択">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+      </button>
+    </div>
+
+    <div v-if="!qrManualMode" class="absolute bottom-6 left-4 right-4 z-20 pointer-events-none flex flex-col items-center gap-2" style="padding-bottom: env(safe-area-inset-bottom, 0px);">
+      <div v-if="qrError" class="bg-red-600/90 text-white text-xs font-bold px-5 py-3 rounded-full backdrop-blur-md shadow-lg border border-red-400/30">
+        {{ qrError }}
+      </div>
+      <div v-else-if="qrJustDetected" class="qr-detected-box bg-green-500/90 text-white text-sm font-bold px-6 py-3.5 rounded-2xl backdrop-blur-md shadow-2xl border border-green-300/40 flex items-center gap-2">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>
+        <span>読み取り完了：{{ qrJustDetected }}</span>
+      </div>
+      <div v-else class="bg-black/40 text-white/90 text-xs font-medium px-4 py-2 rounded-full backdrop-blur-md border border-white/10 shadow text-center">
+        QRコードにかざしてください
+      </div>
+    </div>
+
+    <div v-if="qrManualMode" class="relative z-20 flex-1 flex items-center justify-center p-4">
+      <div class="w-full max-w-sm bg-white rounded-2xl p-6 text-center gm-shadow-lg">
+        <h3 class="font-bold text-gray-900 mb-3 text-sm">手動で場所を選択</h3>
+        <div v-if="qrError" class="mb-3 text-xs text-red-600 font-bold bg-red-50 rounded-lg py-2 px-3">
+          {{ qrError }}
+        </div>
+        <select v-model="qrSelectedRoomKey" class="w-full mb-4 px-3 py-2.5 text-xs bg-gray-50 border border-gray-200 rounded-xl text-gray-800">
+          <option value="">部屋を選択...</option>
+          <option v-for="opt in allRoomOptions" :key="opt.key" :value="opt.key">[{{ opt.floorName }}] {{ opt.title }}</option>
+        </select>
+        <button class="w-full py-2.5 bg-blue-600 text-white rounded-xl text-xs font-bold gm-shadow mb-2 hover:bg-blue-700" @click="confirmQrSetCurrent">
+          現在地として設定
+        </button>
+        <button class="w-full py-2 bg-gray-100 text-gray-600 rounded-xl text-xs font-bold hover:bg-gray-200" @click="toggleQrManualMode">
+          スキャンに戻る
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const { createApp, reactive, computed, ref, nextTick, onMounted, onUnmounted } = Vue;
+
+createApp({
+  setup(){
+    const floors = reactive([]);
+    const currentFloorId = ref(null);
+    const mapViewport = ref(null);
+    const searchInputRef = ref(null);
+
+    const zoom = ref(1.0);
+    const panX = ref(0);
+    const panY = ref(0);
+
+    const menuOpen = ref(false);
+    const favModalOpen = ref(false);
+    const qrModalOpen = ref(false);
+    const qrSelectedRoomKey = ref('');
+    const qrVideoRef = ref(null);
+    const qrCanvasRef = ref(null);
+    const qrBinarizeCanvasRef = ref(null);
+    const qrManualMode = ref(false);
+    const qrError = ref('');
+    const qrJustDetected = ref('');
+    let qrStream = null;
+    let qrScanRAF = null;
+    let qrScanCanvasCtx = null;
+    let qrBinarizeCanvasCtx = null;
+    let qrLastScanTime = 0;
+    let qrCooldownUntil = 0;
+    let qrScanPhase = 0;
+    
+    const QR_SCAN_INTERVAL_MS = 30;
+    const QR_PREFIX = 'CAMPUSNAV:';
+    const searchQuery = ref('');
+    const showSearchResults = ref(false);
+    const searchResults = ref([]);
+    const favorites = reactive([]);
+
+    const searchTargetMode = ref('any');
+
+    const popup = reactive({ open: false, room: null, floorId: null, floorName: '' });
+
+    const currentLocation = ref(null);
+    const destination = ref(null);
+    const routeResult = ref(null);
+
+    const currentFloor = computed(() => floors.find(f => f.floorId === currentFloorId.value) || null);
+
+    const searchPlaceholder = computed(() => {
+      if (searchTargetMode.value === 'current') return '現在地を検索して指定...';
+      if (searchTargetMode.value === 'dest') return '目的地を検索して指定...';
+      return 'ここで検索';
+    });
+
+    const isMultiFloorRoute = computed(() => {
+      return routeResult.value && routeResult.value.found && routeResult.value.floorSequence && routeResult.value.floorSequence.length > 1;
+    });
+
+    const isMultiFloorView = computed(() => {
+      return currentFloorId.value === 'all_route' && isMultiFloorRoute.value;
+    });
+
+    function getFloorHeight(f) {
+      if (!f) return 700;
+      if (f.height) return f.height;
+      if (!f.nodes || f.nodes.length === 0) return 700;
+      return Math.max(700, Math.max(...f.nodes.map(n => n.y)) + 150);
+    }
+
+    const FLOOR_GAP = 120;
+
+    const visibleFloorLayouts = computed(() => {
+      if (floors.length === 0) return [];
+      
+      if (isMultiFloorView.value) {
+        const seq = [...routeResult.value.floorSequence];
+        seq.sort((a, b) => {
+          const idxA = floors.findIndex(f => f.floorId === a);
+          const idxB = floors.findIndex(f => f.floorId === b);
+          return idxB - idxA;
+        });
+
+        let currentY = 0;
+        const layouts = [];
+        seq.forEach(fId => {
+          const f = floors.find(x => x.floorId === fId);
+          if (f) {
+            const h = getFloorHeight(f);
+            layouts.push({ floor: f, offsetY: currentY, height: h });
+            currentY += h + FLOOR_GAP;
+          }
+        });
+        return layouts;
+      } else {
+        const f = currentFloor.value;
+        if (!f) return [];
+        return [{ floor: f, offsetY: 0, height: getFloorHeight(f) }];
+      }
+    });
+
+    const canvasWidth = computed(() => {
+      if (floors.length === 0) return 1000;
+      let maxWidth = 1000;
+      floors.forEach(f => {
+        const w = f.width || (f.nodes && f.nodes.length > 0 ? Math.max(...f.nodes.map(n => n.x)) + 150 : 1000);
+        if (w > maxWidth) maxWidth = w;
+      });
+      return maxWidth;
+    });
+
+    const totalCanvasHeight = computed(() => {
+      const layouts = visibleFloorLayouts.value;
+      if (layouts.length === 0) return 700;
+      const last = layouts[layouts.length - 1];
+      return last.offsetY + last.height;
+    });
+
+    const multiFloorInterConnections = computed(() => {
+      if (!isMultiFloorView.value || !routeResult.value || !routeResult.value.transitions) return [];
+      const conns = [];
+      const layouts = visibleFloorLayouts.value;
+
+      routeResult.value.transitions.forEach(tr => {
+        const lFrom = layouts.find(l => l.floor.floorId === tr.fromFloorId);
+        const lTo = layouts.find(l => l.floor.floorId === tr.toFloorId);
+        if (lFrom && lTo) {
+          const nFrom = lFrom.floor.nodes.find(n => n.id === tr.fromNodeId);
+          const nTo = lTo.floor.nodes.find(n => n.id === tr.toNodeId);
+          if (nFrom && nTo) {
+            conns.push({
+              x1: nFrom.x,
+              y1: lFrom.offsetY + nFrom.y,
+              x2: nTo.x,
+              y2: lTo.offsetY + nTo.y
+            });
+          }
+        }
+      });
+      return conns;
+    });
+
+    const canvasTransformStyle = computed(() => {
+      return {
+        transform: `translate3d(${panX.value}px, ${panY.value}px, 0px) scale(${zoom.value})`
+      };
+    });
+
+    // 起動時のmaps.json自動ロード
+    onMounted(() => {
+      fetch('maps.json')
+        .then(res => {
+          if (res.ok) return res.json();
+          throw new Error('maps.json not found');
+        })
+        .then(data => {
+          if (data.floors && Array.isArray(data.floors)) {
+            loadFloorsData(data.floors);
+          } else if (data.floorId) {
+            loadFloorsData([data]);
+          }
+        })
+        .catch(() => {
+          // maps.jsonがない場合は静かに手動読み込みへフォールバック
+        });
+    });
+
+    function applyZoomAtPoint(newZoom, centerX, centerY) {
+      newZoom = Math.min(Math.max(newZoom, 0.2), 3.0);
+      if (newZoom === zoom.value) return;
+
+      const currentZoom = zoom.value;
+      const mapX = (centerX - panX.value) / currentZoom;
+      const mapY = (centerY - panY.value) / currentZoom;
+
+      panX.value = centerX - mapX * newZoom;
+      panY.value = centerY - mapY * newZoom;
+      zoom.value = newZoom;
+    }
+
+    function applyZoomAtViewportCenter(newZoom) {
+      let cx = window.innerWidth / 2;
+      let cy = window.innerHeight / 2;
+      if (mapViewport.value) {
+        const rect = mapViewport.value.getBoundingClientRect();
+        cx = rect.left + rect.width / 2;
+        cy = rect.top + rect.height / 2;
+      }
+      applyZoomAtPoint(newZoom, cx, cy);
+    }
+
+    function centerCameraAt(x, y, targetZoom = null) {
+      let viewportWidth = window.innerWidth;
+      let viewportHeight = window.innerHeight;
+      if (mapViewport.value) {
+        const rect = mapViewport.value.getBoundingClientRect();
+        viewportWidth = rect.width;
+        viewportHeight = rect.height;
+      }
+      if (targetZoom !== null) zoom.value = targetZoom;
+
+      panX.value = (viewportWidth / 2) - (x * zoom.value);
+      panY.value = (viewportHeight / 2) - (y * zoom.value);
+    }
+
+    const activePointers = reactive(new Map());
+    let initialPinchDist = 0;
+    let initialPinchZoom = 1;
+
+    function onPointerDown(e) {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      
+      if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        initialPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        initialPinchZoom = zoom.value;
+      }
+    }
+
+    function onPointerMove(e) {
+      if (!activePointers.has(e.pointerId)) return;
+
+      const prev = activePointers.get(e.pointerId);
+      const dx = e.clientX - prev.x;
+      const dy = e.clientY - prev.y;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (activePointers.size === 1) {
+        panX.value += dx;
+        panY.value += dy;
+      } else if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const currentCenter = {
+          x: (pts[0].x + pts[1].x) / 2,
+          y: (pts[0].y + pts[1].y) / 2
+        };
+
+        if (initialPinchDist > 0) {
+          const factor = currentDist / initialPinchDist;
+          const targetZoom = initialPinchZoom * factor;
+          applyZoomAtPoint(targetZoom, currentCenter.x, currentCenter.y);
+        }
+      }
+    }
+
+    function onPointerUp(e) {
+      activePointers.delete(e.pointerId);
+      if (activePointers.size < 2) initialPinchDist = 0;
+    }
+
+    function onWheel(e) {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+      applyZoomAtPoint(zoom.value * zoomFactor, e.clientX, e.clientY);
+    }
+
+    function zoomIn() { applyZoomAtViewportCenter(zoom.value + 0.25); }
+    function zoomOut() { applyZoomAtViewportCenter(zoom.value - 0.25); }
+
+    function onImageLoad(e, floor) {
+      if (e.target && (!floor.width || !floor.height)) {
+        floor.width = e.target.naturalWidth;
+        floor.height = e.target.naturalHeight;
+      }
+    }
+
+    function nodeXY(floor, id){
+      const n = floor.nodes.find(x => x.id === id);
+      return n ? { x: n.x, y: n.y } : { x: 0, y: 0 };
+    }
+
+    function roomPinsOfFloor(floor){
+      if(!floor || !floor.rooms) return [];
+      const pins = [];
+      floor.rooms.forEach(r => {
+        if(r.entranceNodeIds && r.entranceNodeIds.length > 0){
+          r.entranceNodeIds.forEach(nodeId => {
+            const ent = floor.nodes.find(n => n.id === nodeId);
+            if(ent){
+              pins.push({
+                uniqueId: r.id + '_' + nodeId,
+                id: r.id,
+                title: r.title,
+                x: ent.x,
+                y: ent.y,
+                room: r
+              });
+            }
+          });
+        }
+      });
+      return pins;
+    }
+
+    function openRoomPopup(room, floor){
+      popup.open = true;
+      popup.room = room;
+      popup.floorId = floor.floorId;
+      popup.floorName = floor.floorName;
+
+      // 詳細表示時にその部屋を中心に拡大移動
+      const node = floor.nodes.find(n => room.entranceNodeIds && room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+      if (node) {
+        nextTick(() => {
+          centerCameraAt(node.x, node.y, 1.3);
+        });
+      }
+    }
+
+    function openStairInfo(n, floor){
+      popup.open = true;
+      popup.room = { id: n.id, title: (n.label || '階段'), imageUrl: '', description: '階層をつなぐ階段です。', entranceNodeIds: [n.id] };
+      popup.floorId = floor.floorId;
+      popup.floorName = floor.floorName;
+
+      // 階段情報表示時にその階段を中心に拡大移動
+      nextTick(() => {
+        centerCameraAt(n.x, n.y, 1.3);
+      });
+    }
+
+    function setFloorMode(floorId) {
+      currentFloorId.value = floorId;
+      if (floorId === 'all_route') {
+        nextTick(() => {
+          centerCameraAt(canvasWidth.value / 2, totalCanvasHeight.value / 2, 0.6);
+        });
+      }
+    }
+
+    function stairTransitionsForFloor(floorId) {
+      if (!routeResult.value || !routeResult.value.found || !routeResult.value.transitions) return [];
+      const res = [];
+      routeResult.value.transitions.forEach(tr => {
+        if (tr.fromFloorId === floorId) {
+          const f = floors.find(x => x.floorId === floorId);
+          if (f) {
+            const node = f.nodes.find(n => n.id === tr.fromNodeId);
+            if (node) {
+              const fromIdx = floors.findIndex(x => x.floorId === tr.fromFloorId);
+              const toIdx = floors.findIndex(x => x.floorId === tr.toFloorId);
+              
+              const getFloorNum = (id) => {
+                const match = String(id).match(/\d+/);
+                return match ? parseInt(match[0], 10) : null;
+              };
+              const numFrom = getFloorNum(tr.fromFloorId);
+              const numTo = getFloorNum(tr.toFloorId);
+
+              let direction = 'up';
+              if (numFrom !== null && numTo !== null) {
+                direction = numTo >= numFrom ? 'up' : 'down';
+              } else {
+                direction = toIdx >= fromIdx ? 'up' : 'down';
+              }
+
+              res.push({
+                node,
+                targetFloorId: tr.toFloorId,
+                targetNodeId: tr.toNodeId,
+                direction
+              });
+            }
+          }
+        }
+      });
+      return res;
+    }
+
+    function jumpToStair(targetFloorId, targetNodeId) {
+      if (currentFloorId.value !== 'all_route') {
+        currentFloorId.value = targetFloorId;
+      }
+      
+      nextTick(() => {
+        const layout = visibleFloorLayouts.value.find(l => l.floor.floorId === targetFloorId);
+        if (layout) {
+          const node = layout.floor.nodes.find(n => n.id === targetNodeId);
+          if (node) {
+            const absoluteX = node.x;
+            const absoluteY = layout.offsetY + node.y;
+            centerCameraAt(absoluteX, absoluteY, Math.max(zoom.value, 1.0));
+          }
+        }
+      });
+    }
+
+    function setAsCurrent(){
+      const floor = floors.find(f => f.floorId === popup.floorId);
+      const node = floor.nodes.find(n => popup.room.entranceNodeIds && popup.room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+      currentLocation.value = {
+        floorId: floor.floorId,
+        room: popup.room,
+        x: node ? node.x : 0,
+        y: node ? node.y : 0,
+        label: '[' + floor.floorName + '] ' + popup.room.title
+      };
+      currentFloorId.value = floor.floorId;
+      popup.open = false;
+
+      // 現在地設定時に画面中央へ移動＆拡大調整
+      nextTick(() => {
+        centerCameraAt(currentLocation.value.x, currentLocation.value.y, 1.3);
+      });
+
+      computeRoute();
+    }
+
+    function setAsDestination(){
+      const floor = floors.find(f => f.floorId === popup.floorId);
+      const node = floor.nodes.find(n => popup.room.entranceNodeIds && popup.room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+      destination.value = {
+        floorId: floor.floorId,
+        room: popup.room,
+        x: node ? node.x : 0,
+        y: node ? node.y : 0,
+        label: '[' + floor.floorName + '] ' + popup.room.title
+      };
+      popup.open = false;
+      computeRoute();
+    }
+
+    function clearRoute(){
+      currentLocation.value = null;
+      destination.value = null;
+      routeResult.value = null;
+      if (currentFloorId.value === 'all_route' && floors.length > 0) {
+        currentFloorId.value = floors[0].floorId;
+      }
+    }
+
+    function activateSearchMode(mode) {
+      searchTargetMode.value = mode;
+      showSearchResults.value = true;
+      nextTick(() => {
+        if (searchInputRef.value) searchInputRef.value.focus();
+      });
+    }
+
+    function isFavorite(roomId){
+      return favorites.some(f => f.roomId === roomId);
+    }
+
+    function toggleFavorite(room, floorId, floorName){
+      if(!room) return;
+      floorId = floorId || popup.floorId;
+      floorName = floorName || popup.floorName;
+      const idx = favorites.findIndex(f => f.roomId === room.id);
+      if(idx >= 0) favorites.splice(idx, 1);
+      else favorites.push({ roomId: room.id, floorId, floorName, title: room.title });
+    }
+
+    function removeFavorite(fav){
+      const idx = favorites.findIndex(f => f.roomId === fav.roomId);
+      if(idx >= 0) favorites.splice(idx, 1);
+    }
+
+    function jumpToFavorite(fav){
+      const floor = floors.find(f => f.floorId === fav.floorId);
+      if(!floor) return;
+      const room = floor.rooms.find(r => r.id === fav.roomId);
+      if(!room) return;
+      currentFloorId.value = floor.floorId;
+      openRoomPopup(room, floor);
+      favModalOpen.value = false;
+    }
+
+    function onSearchInput(){
+      const q = searchQuery.value.trim();
+      if(!q){ searchResults.value = []; return; }
+      const results = [];
+      floors.forEach(f => {
+        f.rooms.forEach(r => {
+          if((r.title || '').includes(q) || (r.id || '').includes(q)){
+            results.push({ room: r, floorId: f.floorId, floorName: f.floorName });
+          }
+        });
+      });
+      searchResults.value = results.slice(0, 20);
+    }
+
+    function clearSearch(){
+      searchQuery.value = '';
+      searchResults.value = [];
+      showSearchResults.value = false;
+      searchTargetMode.value = 'any';
+    }
+
+    function selectSearchResult(r){
+      const floor = floors.find(f => f.floorId === r.floorId);
+      currentFloorId.value = floor.floorId;
+      
+      if (searchTargetMode.value === 'current') {
+        const node = floor.nodes.find(n => r.room.entranceNodeIds && r.room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+        currentLocation.value = {
+          floorId: floor.floorId,
+          room: r.room,
+          x: node ? node.x : 0,
+          y: node ? node.y : 0,
+          label: '[' + floor.floorName + '] ' + r.room.title
+        };
+        nextTick(() => {
+          centerCameraAt(currentLocation.value.x, currentLocation.value.y, 1.3);
+        });
+        computeRoute();
+      } else if (searchTargetMode.value === 'dest') {
+        const node = floor.nodes.find(n => r.room.entranceNodeIds && r.room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+        destination.value = {
+          floorId: floor.floorId,
+          room: r.room,
+          x: node ? node.x : 0,
+          y: node ? node.y : 0,
+          label: '[' + floor.floorName + '] ' + r.room.title
+        };
+        computeRoute();
+      } else {
+        openRoomPopup(r.room, floor);
+      }
+
+      showSearchResults.value = false;
+      searchQuery.value = '';
+      searchTargetMode.value = 'any';
+    }
+
+    const allRoomOptions = computed(() => {
+      const opts = [];
+      floors.forEach(f => f.rooms.forEach(r => opts.push({ key: f.floorId + '::' + r.id, floorId: f.floorId, floorName: f.floorName, roomId: r.id, title: r.title })));
+      return opts;
+    });
+
+    function confirmQrSetCurrent(){
+      if(!qrSelectedRoomKey.value) return;
+      const [floorId, roomId] = qrSelectedRoomKey.value.split('::');
+      const floor = floors.find(f => f.floorId === floorId);
+      const room = floor.rooms.find(r => r.id === roomId);
+      if(room){
+        const node = floor.nodes.find(n => room.entranceNodeIds && room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+        currentLocation.value = { floorId, room, x: node.x, y: node.y, label: '[' + floor.floorName + '] ' + room.title };
+        currentFloorId.value = floorId;
+        nextTick(() => {
+          centerCameraAt(currentLocation.value.x, currentLocation.value.y, 1.3);
+        });
+        computeRoute();
+      }
+      closeQrScanner();
+    }
+
+    function applyRoomFromQrPayload(floorId, roomId){
+      const floor = floors.find(f => f.floorId === floorId);
+      if(!floor){
+        qrError.value = '未読み込みのフロアです';
+        return false;
+      }
+      const room = floor.rooms.find(r => r.id === roomId);
+      if(!room){
+        qrError.value = '該当する部屋が見つかりません';
+        return false;
+      }
+      const node = floor.nodes.find(n => room.entranceNodeIds && room.entranceNodeIds.includes(n.id)) || floor.nodes[0];
+      currentLocation.value = {
+        floorId,
+        room,
+        x: node ? node.x : 0,
+        y: node ? node.y : 0,
+        label: '[' + floor.floorName + '] ' + room.title
+      };
+      currentFloorId.value = floorId;
+      nextTick(() => {
+        centerCameraAt(currentLocation.value.x, currentLocation.value.y, 1.3);
+      });
+      computeRoute();
+      return true;
+    }
+
+    function parseQrPayload(text){
+      if(typeof text !== 'string') return null;
+      const trimmed = text.trim();
+      if(!trimmed.startsWith(QR_PREFIX)) return null;
+      const body = trimmed.slice(QR_PREFIX.length);
+      const sepIdx = body.indexOf('::');
+      if(sepIdx < 0) return null;
+      const floorId = body.slice(0, sepIdx).trim();
+      const roomId = body.slice(sepIdx + 2).trim();
+      if(!floorId || !roomId) return null;
+      return { floorId, roomId };
+    }
+
+    function handleQrDecodedText(text){
+      const payload = parseQrPayload(text);
+      if(!payload){
+        qrError.value = 'このQRコードは対応していません';
+        setTimeout(() => { if(qrError.value === 'このQRコードは対応していません') qrError.value = ''; }, 1200);
+        return;
+      }
+      const ok = applyRoomFromQrPayload(payload.floorId, payload.roomId);
+      if(ok){
+        qrError.value = '';
+        const floor = floors.find(f => f.floorId === payload.floorId);
+        const room = floor ? floor.rooms.find(r => r.id === payload.roomId) : null;
+        qrJustDetected.value = room ? room.title : payload.roomId;
+        if(navigator.vibrate) navigator.vibrate([40, 30, 40]);
+        qrCooldownUntil = performance.now() + 600;
+        setTimeout(() => { closeQrScanner(); }, 500);
+      } else {
+        setTimeout(() => { qrError.value = ''; }, 1200);
+      }
+    }
+
+    function applyAdaptiveEnhancement(imageData) {
+      const data = imageData.data;
+      const len = data.length;
+      let sum = 0;
+      for (let i = 0; i < len; i += 16) {
+        sum += (data[i] + data[i+1] + data[i+2]) / 3;
+      }
+      const avgLuma = sum / (len / 16);
+
+      for (let i = 0; i < len; i += 4) {
+        const luma = (data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114);
+        const v = luma > avgLuma ? 255 : 0;
+        data[i] = v;
+        data[i+1] = v;
+        data[i+2] = v;
+      }
+    }
+
+    function scanQrFrame(timestamp){
+      if(!qrModalOpen.value || qrManualMode.value){
+        qrScanRAF = null;
+        return;
+      }
+      if(performance.now() < qrCooldownUntil){
+        qrScanRAF = requestAnimationFrame(scanQrFrame);
+        return;
+      }
+      if(timestamp - qrLastScanTime < QR_SCAN_INTERVAL_MS){
+        qrScanRAF = requestAnimationFrame(scanQrFrame);
+        return;
+      }
+      qrLastScanTime = timestamp;
+
+      const video = qrVideoRef.value;
+      const canvas = qrCanvasRef.value;
+      if(!video || !canvas || video.readyState < video.HAVE_CURRENT_DATA || !video.videoWidth){
+        qrScanRAF = requestAnimationFrame(scanQrFrame);
+        return;
+      }
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      qrScanPhase = (qrScanPhase + 1) % 4;
+
+      let targetWidth = 640;
+      if (qrScanPhase === 1) targetWidth = 1080;
+      if (qrScanPhase === 2) targetWidth = 500;
+
+      const scale = Math.min(1, targetWidth / vw);
+      const w = Math.max(1, Math.round(vw * scale));
+      const h = Math.max(1, Math.round(vh * scale));
+
+      if(canvas.width !== w || canvas.height !== h){
+        canvas.width = w;
+        canvas.height = h;
+        qrScanCanvasCtx = canvas.getContext('2d', { willReadFrequently: true });
+      }
+      if(!qrScanCanvasCtx){
+        qrScanCanvasCtx = canvas.getContext('2d', { willReadFrequently: true });
+      }
+
+      try {
+        qrScanCanvasCtx.drawImage(video, 0, 0, w, h);
+        let imageData = qrScanCanvasCtx.getImageData(0, 0, w, h);
+
+        if (qrScanPhase === 2) {
+          applyAdaptiveEnhancement(imageData);
+        }
+
+        const inversionOption = (qrScanPhase === 3) ? 'invert' : 'attemptBoth';
+        const code = jsQR(imageData.data, w, h, { inversionAttempts: inversionOption });
+        
+        if(code && code.data){
+          handleQrDecodedText(code.data);
+        }
+      } catch(err) {
+      }
+
+      qrScanRAF = requestAnimationFrame(scanQrFrame);
+    }
+
+    async function startQrScanner(){
+      qrError.value = '';
+      qrJustDetected.value = '';
+      qrManualMode.value = false;
+      qrCooldownUntil = 0;
+      qrLastScanTime = 0;
+
+      if(!window.isSecureContext){
+        qrError.value = 'この画面は安全な接続(HTTPS)で開かれていないためカメラを使用できません';
+        qrManualMode.value = true;
+        return;
+      }
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+        qrError.value = 'このブラウザ環境ではカメラ機能が許可されていません';
+        qrManualMode.value = true;
+        return;
+      }
+      if(typeof jsQR !== 'function'){
+        qrError.value = 'QR読み取りモジュールの読み込みに失敗しました';
+        qrManualMode.value = true;
+        return;
+      }
+
+      try{
+        qrStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 },
+            focusMode: { ideal: 'continuous' }
+          },
+          audio: false
+        });
+
+        const track = qrStream.getVideoTracks()[0];
+        if (track && typeof track.getCapabilities === 'function') {
+          const capabilities = track.getCapabilities();
+          const constraints = {};
+          if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+            constraints.focusMode = 'continuous';
+          }
+          if (Object.keys(constraints).length > 0) {
+            await track.applyConstraints({ advanced: [constraints] }).catch(() => {});
+          }
+        }
+      }catch(err){
+        const name = err && err.name ? err.name : '';
+        if(name === 'NotAllowedError' || name === 'PermissionDeniedError'){
+          qrError.value = 'カメラへのアクセスが許可されませんでした';
+        } else if(name === 'NotFoundError' || name === 'DevicesNotFoundError'){
+          qrError.value = 'カメラが見つかりません';
+        } else if(name === 'NotReadableError' || name === 'TrackStartError'){
+          qrError.value = '他のアプリがカメラを使用中です';
+        } else {
+          qrError.value = 'カメラ起動エラー: ' + (name || (err && err.message) || '不明');
+        }
+        qrManualMode.value = true;
+        return;
+      }
+
+      await nextTick();
+      const video = qrVideoRef.value;
+      if(video){
+        video.srcObject = qrStream;
+        try{ await video.play(); }catch(e){ }
+      }
+
+      qrScanRAF = requestAnimationFrame(scanQrFrame);
+    }
+
+    function stopQrScanner(){
+      if(qrScanRAF){
+        cancelAnimationFrame(qrScanRAF);
+        qrScanRAF = null;
+      }
+      if(qrStream){
+        qrStream.getTracks().forEach(t => t.stop());
+        qrStream = null;
+      }
+      const video = qrVideoRef.value;
+      if(video) video.srcObject = null;
+    }
+
+    function openQrScanner(){
+      qrModalOpen.value = true;
+      nextTick(() => startQrScanner());
+    }
+
+    function closeQrScanner(){
+      stopQrScanner();
+      qrModalOpen.value = false;
+      qrManualMode.value = false;
+      qrSelectedRoomKey.value = '';
+      qrError.value = '';
+      qrJustDetected.value = '';
+    }
+
+    onUnmounted(() => { stopQrScanner(); });
+
+    function toggleQrManualMode(){
+      qrManualMode.value = !qrManualMode.value;
+      qrError.value = '';
+      if(qrManualMode.value){
+        stopQrScanner();
+      } else {
+        startQrScanner();
+      }
+    }
+
+    function loadFloorsData(list){
+      list.forEach(f => {
+        const idx = floors.findIndex(ff => ff.floorId === f.floorId);
+        if(idx >= 0) floors.splice(idx, 1, f); else floors.push(f);
+      });
+      if(!currentFloorId.value && floors.length > 0) currentFloorId.value = floors[0].floorId;
+    }
+
+    function importAllFloors(evt){
+      const file = evt.target.files[0];
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try{
+          const data = JSON.parse(reader.result);
+          if(data.floors && Array.isArray(data.floors)) loadFloorsData(data.floors);
+          else if(data.floorId) loadFloorsData([data]);
+          else alert('不正なJSON形式です');
+        }catch(e){ alert('読み込みエラー: ' + e.message); }
+        evt.target.value = '';
+      };
+      reader.readAsText(file);
+    }
+
+    function importOneFloor(evt){
+      const file = evt.target.files[0];
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try{
+          const data = JSON.parse(reader.result);
+          if(data.floorId) loadFloorsData([data]);
+          else alert('不正なJSON形式です');
+        }catch(e){ alert('読み込みエラー: ' + e.message); }
+        evt.target.value = '';
+      };
+      reader.readAsText(file);
+    }
+
+    function removeFloor(floorId){
+      const idx = floors.findIndex(f => f.floorId === floorId);
+      if(idx >= 0) floors.splice(idx, 1);
+      if(currentFloorId.value === floorId) currentFloorId.value = floors.length > 0 ? floors[0].floorId : null;
+    }
+
+    function getClosestPointOnSegment(p, a, b) {
+      const ab = { x: b.x - a.x, y: b.y - a.y };
+      const abLenSq = ab.x * ab.x + ab.y * ab.y;
+      if (abLenSq === 0) return { x: a.x, y: a.y, t: 0 };
+      const ap = { x: p.x - a.x, y: p.y - a.y };
+      let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
+      t = Math.max(0, Math.min(1, t));
+      return {
+        x: a.x + t * ab.x,
+        y: a.y + t * ab.y,
+        t: t
+      };
+    }
+
+    function buildSingleFloorGraph(floor, activeEntranceNodeIds = []){
+      const nodesMap = new Map();
+      floor.nodes.forEach(n => nodesMap.set(n.id, { ...n }));
+      
+      let edgesList = floor.edges.map(e => ({ ...e }));
+
+      activeEntranceNodeIds.forEach(eId => {
+        const entNode = nodesMap.get(eId);
+        if (!entNode) return;
+
+        let minDistance = Infinity;
+        let bestProjection = null;
+        let bestEdge = null;
+
+        edgesList.forEach(e => {
+          const n1 = nodesMap.get(e.from);
+          const n2 = nodesMap.get(e.to);
+          if (!n1 || !n2) return;
+          if (e.from === eId || e.to === eId) return;
+
+          const proj = getClosestPointOnSegment(entNode, n1, n2);
+          const dist = Math.hypot(entNode.x - proj.x, entNode.y - proj.y);
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestProjection = proj;
+            bestEdge = e;
+          }
+        });
+
+        if (bestEdge && bestProjection) {
+          const projNodeId = '_virt_proj_' + eId;
+          nodesMap.set(projNodeId, { id: projNodeId, x: bestProjection.x, y: bestProjection.y });
+          
+          edgesList = edgesList.filter(e => e.id !== bestEdge.id);
+          edgesList.push({ id: '_v_edge_' + eId, from: eId, to: projNodeId });
+          edgesList.push({ id: '_v_edge_a_' + eId, from: bestEdge.from, to: projNodeId });
+          edgesList.push({ id: '_v_edge_b_' + eId, from: projNodeId, to: bestEdge.to });
+        }
+      });
+
+      const adj = {};
+      nodesMap.forEach(n => adj[n.id] = []);
+
+      edgesList.forEach(e => {
+        const n1 = nodesMap.get(e.from);
+        const n2 = nodesMap.get(e.to);
+        if(!n1 || !n2) return;
+        const w = Math.hypot(n1.x - n2.x, n1.y - n2.y);
+        adj[e.from].push({ to: e.to, weight: w });
+        adj[e.to].push({ to: e.from, weight: w });
+      });
+
+      return { adj, nodesMap };
+    }
+
+    function dijkstraSingleFloor(floor, startNodeId, endNodeId){
+      const { adj, nodesMap } = buildSingleFloorGraph(floor, [startNodeId, endNodeId]);
+      const dist = {};
+      const prev = {};
+      dist[startNodeId] = 0;
+      const queue = new Set(Object.keys(adj));
+
+      while(queue.size > 0){
+        let u = null, best = Infinity;
+        queue.forEach(k => {
+          if(dist[k] !== undefined && dist[k] < best){ best = dist[k]; u = k; }
+        });
+        if(u === null) break;
+        queue.delete(u);
+        if(u === endNodeId) break;
+
+        (adj[u] || []).forEach(edge => {
+          const alt = dist[u] + edge.weight;
+          if(dist[edge.to] === undefined || alt < dist[edge.to]){
+            dist[edge.to] = alt;
+            prev[edge.to] = u;
+          }
+        });
+      }
+
+      if(dist[endNodeId] === undefined) return null;
+      const pathNodes = [];
+      let cur = endNodeId;
+      while(cur){
+        const nodeObj = nodesMap.get(cur);
+        if (nodeObj) pathNodes.unshift(nodeObj);
+        cur = prev[cur];
+      }
+      return { pathNodes, distance: dist[endNodeId] };
+    }
+
+    function findBestFloorPath(floor, startNodeIds, endNodeIds){
+      let bestPath = null;
+      let minDistance = Infinity;
+
+      startNodeIds.forEach(sId => {
+        endNodeIds.forEach(eId => {
+          const res = dijkstraSingleFloor(floor, sId, eId);
+          if (res && res.distance < minDistance) {
+            minDistance = res.distance;
+            bestPath = res.pathNodes;
+          }
+        });
+      });
+
+      return bestPath ? { pathNodes: bestPath, distance: minDistance } : null;
+    }
+
+    function computeRoute(){
+      routeResult.value = null;
+      if(!currentLocation.value || !destination.value) return;
+
+      const startFloor = floors.find(f => f.floorId === currentLocation.value.floorId);
+      const destFloor = floors.find(f => f.floorId === destination.value.floorId);
+      if(!startFloor || !destFloor) return;
+
+      const getEntranceNodes = (room, floor) => {
+        let ids = room.entranceNodeIds || [];
+        if(ids.length === 0) ids = [room.id];
+        return ids.filter(id => floor.nodes.some(n => n.id === id));
+      };
+
+      const startEntrances = getEntranceNodes(currentLocation.value.room, startFloor);
+      const destEntrances = getEntranceNodes(destination.value.room, destFloor);
+
+      const triggerRouteCameraPan = () => {
+        // 他階層のDOM準備等を待つため数ミリ秒（150ms）遅延を入れてから視点をワープさせる
+        setTimeout(() => {
+          nextTick(() => {
+            if (currentLocation.value) {
+              if (currentFloorId.value === 'all_route') {
+                centerCameraAt(canvasWidth.value / 2, totalCanvasHeight.value / 2, 0.55);
+              } else {
+                centerCameraAt(currentLocation.value.x, currentLocation.value.y, 1.3);
+              }
+            }
+          });
+        }, 150);
+      };
+
+      if (startFloor.floorId === destFloor.floorId) {
+        const res = findBestFloorPath(startFloor, startEntrances, destEntrances);
+        if (res) {
+          const pathWithFloor = res.pathNodes.map(n => ({ floorId: startFloor.floorId, x: n.x, y: n.y }));
+          routeResult.value = { found: true, path: pathWithFloor, floorSequence: [startFloor.floorId], transitions: [] };
+          triggerRouteCameraPan();
+        } else {
+          routeResult.value = { found: false, path: [], floorSequence: [], transitions: [] };
+        }
+        return;
+      }
+
+      // 階段選択：出発・目的地を平面上の線分とみなし、線分上に近い階段を優先。
+      const sx = Number(currentLocation.value.x ?? currentLocation.value.room?.x ?? 0);
+      const sy = Number(currentLocation.value.y ?? currentLocation.value.room?.y ?? 0);
+      const dx = Number(destination.value.x ?? destination.value.room?.x ?? 0);
+      const dy = Number(destination.value.y ?? destination.value.room?.y ?? 0);
+      // 平面上の階段選択用に、階段リンクを基準として各階の座標を共通座標系へ補正する。
+      // 1階は体育館の追加分で図面上の位置がずれているため、隣接階の同一階段リンクから
+      // 平行移動量を推定する。経路表示に使う元の座標・ノードは変更しない。
+      const floorPlanOffset = new Map();
+      const offsetForFloor = (floor) => {
+        if (floorPlanOffset.has(floor.floorId)) return floorPlanOffset.get(floor.floorId);
+        const linkedDeltas = [];
+        for (const stair of floor.nodes.filter(n => n.type === 'stair')) {
+          const otherFloor = floors.find(f => f.floorId === stair.linkFloorId);
+          const otherNode = otherFloor?.nodes.find(n => n.id === stair.linkNodeId && n.type === 'stair');
+          if (otherNode) linkedDeltas.push({x: otherNode.x - stair.x, y: otherNode.y - stair.y});
+          if (!otherNode && otherFloor) {
+            const reverse = otherFloor.nodes.find(n => n.type === 'stair' &&
+              n.linkFloorId === floor.floorId && n.linkNodeId === stair.id);
+            if (reverse) linkedDeltas.push({x: reverse.x - stair.x, y: reverse.y - stair.y});
+          }
+        }
+        // 各リンク対応点の中央値を採用し、個々のピンのずれに影響されにくくする。
+        const median = a => {
+          if (!a.length) return 0;
+          const s = [...a].sort((x,y)=>x-y);
+          return s[Math.floor(s.length/2)];
+        };
+        const offset = {x: median(linkedDeltas.map(d=>d.x)), y: median(linkedDeltas.map(d=>d.y))};
+        floorPlanOffset.set(floor.floorId, offset);
+        return offset;
+      };
+      const startOffset = offsetForFloor(startFloor);
+      const destOffset = offsetForFloor(destFloor);
+      const sxPlan = sx + startOffset.x, syPlan = sy + startOffset.y;
+      const dxPlan = dx + destOffset.x, dyPlan = dy + destOffset.y;
+      const vx=dxPlan-sxPlan, vy=dyPlan-syPlan, segmentLen2=vx*vx+vy*vy;
+      const startStairs = startFloor.nodes.filter(n => n.type === 'stair');
+      if (!startStairs.length) {
+        routeResult.value = { found:false, path:[], floorSequence:[], transitions:[] };
+        return;
+      }
+      // 「両地点の間」は、階段への垂線の投影位置が線分の内側にあり、
+      // かつ線分からの横ずれが許容幅以内であること。端点の外側にある階段を誤選択しない。
+      const BETWEEN_TOLERANCE = 20;
+      const candidates = startStairs.map(stair => {
+        const stairOffset = startOffset;
+        const stairX = stair.x + stairOffset.x, stairY = stair.y + stairOffset.y;
+        const t=segmentLen2 ? ((stairX-sxPlan)*vx+(stairY-syPlan)*vy)/segmentLen2 : 0;
+        const clampedT=Math.max(0,Math.min(1,t));
+        const projX=sxPlan+clampedT*vx, projY=syPlan+clampedT*vy;
+        const lineDistance=Math.hypot(stairX-projX,stairY-projY);
+        const startDistance=Math.hypot(stairX-sxPlan,stairY-syPlan);
+        const targetDistance=Math.hypot(stairX-dxPlan,stairY-dyPlan);
+        return {stair,t,lineDistance,startDistance,targetDistance,totalDistance:startDistance+targetDistance};
+      });
+      const betweenCandidates=candidates.filter(c=>
+        segmentLen2>0 && c.t>=0 && c.t<=1 && c.lineDistance<=BETWEEN_TOLERANCE
+      );
+      // 線分内に該当階段があれば、線分への横ずれを最優先し、同程度なら
+      // 出発地・目的地の両方からの距離合計が短い階段を選ぶ。
+      // 該当がなければ目的地までの平面距離が最短の階段を選ぶ。
+      const chosen=(betweenCandidates.length
+        ? betweenCandidates.sort((a,b)=>a.lineDistance-b.lineDistance || a.totalDistance-b.totalDistance)
+        : candidates.sort((a,b)=>a.targetDistance-b.targetDistance)
+      )[0].stair;
+
+      // 選択した階段系列を階ごとに追跡。階段の乗り換えは禁止。
+      const startIndex = floors.findIndex(f=>f.floorId===startFloor.floorId);
+      const destIndex = floors.findIndex(f=>f.floorId===destFloor.floorId);
+      const step = destIndex > startIndex ? 1 : -1;
+      const chain = [{floor:startFloor,node:chosen}];
+      let chainOk = true;
+      for (let idx=startIndex; idx!==destIndex; idx+=step) {
+        const here=chain[chain.length-1];
+        const nextFloor=floors[idx+step];
+        let nextNode=null;
+        if (here.node.linkFloorId===nextFloor.floorId && here.node.linkNodeId) {
+          nextNode=nextFloor.nodes.find(n=>n.id===here.node.linkNodeId && n.type==='stair');
+        }
+        // 下り方向などリンクが逆向きの場合、次階の階段から現在階へのリンクを逆引きする。
+        if (!nextNode) {
+          const reverse=nextFloor.nodes.filter(n=>n.type==='stair' && n.linkFloorId===here.floor.floorId && n.linkNodeId===here.node.id);
+          if (reverse.length===1) nextNode=reverse[0];
+        }
+        // 同じ階段名/系列を維持し、座標が近い同一階段だけを許容。
+        if (!nextNode) {
+          const sameLine=nextFloor.nodes.filter(n=>n.type==='stair')
+            .map(n=>({n,d:Math.hypot(n.x-here.node.x,n.y-here.node.y)}))
+            .sort((a,b)=>a.d-b.d);
+          if (sameLine.length && sameLine[0].d <= 35 && (sameLine.length===1 || sameLine[1].d-sameLine[0].d>1)) nextNode=sameLine[0].n;
+        }
+        if (!nextNode) { chainOk=false; break; }
+        chain.push({floor:nextFloor,node:nextNode});
+      }
+      if (!chainOk || chain.length !== Math.abs(destIndex-startIndex)+1) {
+        routeResult.value={found:false,path:[],floorSequence:[],transitions:[]};
+        return;
+      }
+
+      let combinedPath=[];
+      let transitions=[];
+      let valid=true;
+      for (let i=0;i<chain.length;i++) {
+        const item=chain[i];
+        const fromIds=i===0 ? startEntrances : [chain[i].node.id];
+        const toIds=i===chain.length-1 ? destEntrances : [item.node.id];
+        const res=findBestFloorPath(item.floor,fromIds,toIds);
+        if (!res) { valid=false; break; }
+        const seg=res.pathNodes.map(n=>({floorId:item.floor.floorId,x:n.x,y:n.y}));
+        if (combinedPath.length && seg.length && combinedPath[combinedPath.length-1].floorId===seg[0].floorId && combinedPath[combinedPath.length-1].x===seg[0].x && combinedPath[combinedPath.length-1].y===seg[0].y) seg.shift();
+        combinedPath.push(...seg);
+        if(i<chain.length-1){
+          transitions.push({fromFloorId:item.floor.floorId,fromNodeId:item.node.id,toFloorId:chain[i+1].floor.floorId,toNodeId:chain[i+1].node.id});
+        }
+      }
+      if(valid){
+        routeResult.value={found:true,path:combinedPath,floorSequence:chain.map(c=>c.floor.floorId),transitions};
+        currentFloorId.value='all_route';
+        triggerRouteCameraPan();
+      } else routeResult.value={found:false,path:[],floorSequence:[],transitions:[]};
+    }
+
+    const routeFound = computed(() => routeResult.value ? routeResult.value.found : true);
+
+    function routeSegmentForFloor(floorId){
+      if(!routeResult.value || !routeResult.value.found) return [];
+      return routeResult.value.path.filter(p => p.floorId === floorId);
+    }
+
+    return {
+      mapViewport, searchInputRef, floors, currentFloorId, currentFloor, zoom, zoomIn, zoomOut,
+      canvasWidth, totalCanvasHeight, canvasTransformStyle, searchPlaceholder,
+      onPointerDown, onPointerMove, onPointerUp, onWheel,
+      menuOpen, favModalOpen, qrModalOpen, qrSelectedRoomKey,
+      qrVideoRef, qrCanvasRef, qrBinarizeCanvasRef, qrManualMode, qrError, qrJustDetected,
+      openQrScanner, closeQrScanner, toggleQrManualMode,
+      searchQuery, showSearchResults, searchResults, favorites,
+      popup, currentLocation, destination, routeFound,
+      nodeXY, roomPinsOfFloor, openRoomPopup, openStairInfo,
+      setAsCurrent, setAsDestination, clearRoute, activateSearchMode,
+      isFavorite, toggleFavorite, removeFavorite, jumpToFavorite,
+      onSearchInput, clearSearch, selectSearchResult,
+      allRoomOptions, confirmQrSetCurrent,
+      importAllFloors, importOneFloor, removeFloor,
+      routeSegmentForFloor, onImageLoad,
+      isMultiFloorRoute, isMultiFloorView, visibleFloorLayouts,
+      multiFloorInterConnections, setFloorMode, stairTransitionsForFloor, jumpToStair
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
